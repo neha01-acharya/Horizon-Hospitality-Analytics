@@ -1,0 +1,35 @@
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Sample datasets
+generated_data_sample/
+
+# Generated datasets
+generated_data/
+
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE and system files
+.vscode/
+.idea/
+.DS_Store
+
+# Streamlit
+.streamlit/secrets.toml
