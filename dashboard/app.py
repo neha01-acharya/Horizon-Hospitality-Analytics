@@ -1,1083 +1,590 @@
-
 import streamlit as st
-import plotly.express as px
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 
 from db_connection import fetch_data
 from queries import SEASONAL_KPI_QUERY
 
 
-# ==================================================
-# PAGE CONFIGURATION
-# ==================================================
-
 st.set_page_config(
-    page_title="Horizon Hospitality Analytics",
+    page_title="Horizon | Hospitality Analytics",
     page_icon="🏨",
-    layout="wide"
+    layout="wide",
 )
 
-st.title("🏨 Hotel Business Performance Dashboard")
-
+st.title("Horizon | Hospitality Performance")
 st.caption(
-    "A consolidated view of hotel operations, room revenue, "
-    "guest experience and workforce performance."
+    "Five-year view of room utilisation, room revenue, guest experience "
+    "and workforce attrition."
 )
 
+# Keep the Streamlit canvas and Plotly chart surfaces visually continuous.
+st.markdown(
+    """<style>
+    .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+        background-color: #0B0F14;
+    }
+    [data-testid="stHeader"] { background: rgba(11, 15, 20, 0.96); }
+    [data-testid="stMetric"] {
+        background: transparent;
+        border: 1px solid #27313D;
+        border-radius: 10px;
+        padding: 12px 14px;
+    }
+    </style>""",
+    unsafe_allow_html=True,
+)
 
-# ==================================================
-# LOAD DATA
-# ==================================================
+SEASON_ORDER = ["Winter", "Summer", "Monsoon", "Post-Monsoon"]
+DEFAULT_YEARS = [2022, 2023, 2024, 2025, 2026]
+
 
 @st.cache_data(ttl=300)
 def load_data():
     return fetch_data(SEASONAL_KPI_QUERY)
 
 
-try:
+def validate_columns(data):
+    required = {
+        "year", "season", "hotel_name", "city", "hotel_type",
+        "total_revenue", "occupied_days", "sellable_days",
+        "guest_satisfaction", "employee_turnover_rate",
+    }
+    missing = sorted(required - set(data.columns))
+    if missing:
+        st.error("Missing columns in agg_seasonal_kpis: " + ", ".join(missing))
+        st.stop()
 
+
+def calculate_grouped(data, dimensions):
+    """Recalculate room KPIs from additive room revenue and room-day totals."""
+    if data.empty:
+        return pd.DataFrame()
+
+    result = (
+        data.groupby(dimensions, as_index=False, dropna=False)
+        .agg(
+            room_revenue=("total_revenue", "sum"),
+            occupied_room_days=("occupied_days", "sum"),
+            available_room_days=("sellable_days", "sum"),
+            guest_satisfaction=("guest_satisfaction", "mean"),
+            employee_attrition=("employee_turnover_rate", "mean"),
+        )
+    )
+
+    result["occupancy"] = (
+        result["occupied_room_days"] * 100
+        / result["available_room_days"].replace(0, float("nan"))
+    )
+    result["adr"] = (
+        result["room_revenue"]
+        / result["occupied_room_days"].replace(0, float("nan"))
+    )
+    result["revpar"] = (
+        result["room_revenue"]
+        / result["available_room_days"].replace(0, float("nan"))
+    )
+    return result
+
+
+def portfolio_metrics(data):
+    revenue = data["total_revenue"].fillna(0).sum()
+    occupied = data["occupied_days"].fillna(0).sum()
+    available = data["sellable_days"].fillna(0).sum()
+
+    return {
+        "occupancy": occupied * 100 / available if available else 0,
+        "adr": revenue / occupied if occupied else 0,
+        "revpar": revenue / available if available else 0,
+        "rating": data["guest_satisfaction"].mean(),
+        "attrition": data["employee_turnover_rate"].mean(),
+        "revenue": revenue,
+    }
+
+
+
+# Consistent, professional palette for the dark dashboard.
+SEASON_COLORS = {
+    "Winter": "#6FA8DC",
+    "Summer": "#65B89A",
+    "Monsoon": "#A6A6B8",
+    "Post-Monsoon": "#E0A458",
+}
+
+DASHBOARD_BG = "#0B0F14"
+CHART_BG = DASHBOARD_BG
+PANEL_BG = DASHBOARD_BG
+TEXT_COLOR = "#E8EDF3"
+MUTED_TEXT = "#AAB4C0"
+GRID_COLOR = "#27313D"
+
+
+def style_chart(fig, height=360, show_legend=True):
+    """Apply the same dark styling to every Plotly chart."""
+    fig.update_layout(
+        template="plotly_dark",
+        height=height,
+        margin=dict(l=24, r=24, t=64, b=38),
+        font=dict(family="Arial, sans-serif", size=12, color=TEXT_COLOR),
+        title=dict(
+            font=dict(size=17, color=TEXT_COLOR),
+            x=0.02,
+            xanchor="left",
+        ),
+        legend=(
+            dict(
+                title_text="",
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1,
+                font=dict(size=11, color=MUTED_TEXT),
+                bgcolor="rgba(0,0,0,0)",
+            )
+            if show_legend
+            else dict(visible=False)
+        ),
+        paper_bgcolor=CHART_BG,
+        plot_bgcolor=DASHBOARD_BG,
+        hoverlabel=dict(
+            bgcolor="#1B2530",
+            bordercolor="#344252",
+            font_size=12,
+            font_family="Arial",
+            font_color=TEXT_COLOR,
+        ),
+    )
+    fig.update_xaxes(
+        showgrid=False,
+        zeroline=False,
+        linecolor=GRID_COLOR,
+        tickfont=dict(color=MUTED_TEXT),
+        title_font=dict(color=MUTED_TEXT),
+    )
+    fig.update_yaxes(
+        showgrid=True,
+        gridcolor=GRID_COLOR,
+        zeroline=False,
+        linecolor=GRID_COLOR,
+        tickfont=dict(color=MUTED_TEXT),
+        title_font=dict(color=MUTED_TEXT),
+    )
+    return fig
+
+
+def seasonal_trend(data):
+    trend = calculate_grouped(data, ["year", "season"])
+    if trend.empty:
+        return trend
+
+    trend["year_label"] = trend["year"].astype(int).astype(str)
+    trend["season"] = pd.Categorical(
+        trend["season"], categories=SEASON_ORDER, ordered=True
+    )
+    return trend.sort_values(["year", "season"])
+
+
+def add_trend_line(data, metric, title, y_title, suffix="", prefix=""):
+    trend = seasonal_trend(data)
+    if trend.empty:
+        st.info("No data available for this selection.")
+        return
+
+    fig = px.line(
+        trend,
+        x="year_label",
+        y=metric,
+        color="season",
+        markers=True,
+        category_orders={"season": SEASON_ORDER},
+        color_discrete_map=SEASON_COLORS,
+        title=title,
+        labels={
+            "year_label": "Reporting Year",
+            metric: y_title,
+            "season": "Season",
+        },
+    )
+    fig.update_traces(
+        line=dict(width=2.8),
+        marker=dict(size=8, line=dict(width=1.2, color=CHART_BG)),
+        hovertemplate=(
+            "Year: %{x}<br>Season: %{fullData.name}<br>"
+            + y_title + ": " + prefix + "%{y:,.2f}" + suffix
+            + "<extra></extra>"
+        ),
+    )
+    if suffix == "%":
+        fig.update_yaxes(ticksuffix="%")
+    if prefix == "₹":
+        fig.update_yaxes(tickprefix="₹", separatethousands=True)
+
+    st.plotly_chart(style_chart(fig), use_container_width=True)
+
+
+def add_grouped_bar(data, metric, title, y_title, suffix="", prefix=""):
+    """Grouped seasonal bars for direct year-to-year comparisons."""
+    trend = seasonal_trend(data)
+    if trend.empty:
+        st.info("No data available for this selection.")
+        return
+
+    fig = px.bar(
+        trend,
+        x="year_label",
+        y=metric,
+        color="season",
+        barmode="group",
+        category_orders={"season": SEASON_ORDER},
+        color_discrete_map=SEASON_COLORS,
+        title=title,
+        labels={
+            "year_label": "Reporting Year",
+            metric: y_title,
+            "season": "Season",
+        },
+    )
+    fig.update_traces(
+        marker_line_width=0,
+        hovertemplate=(
+            "Year: %{x}<br>Season: %{fullData.name}<br>"
+            + y_title + ": " + prefix + "%{y:,.2f}" + suffix
+            + "<extra></extra>"
+        ),
+    )
+    if suffix == "%":
+        fig.update_yaxes(ticksuffix="%")
+    if prefix == "₹":
+        fig.update_yaxes(tickprefix="₹", separatethousands=True)
+
+    st.plotly_chart(style_chart(fig, height=390), use_container_width=True)
+
+
+def add_satisfaction_bar(data):
+    """
+    Compare city-level guest ratings on the full 0–5 scale.
+    The source ratings are tightly clustered, so the full scale is retained
+    to avoid exaggerating small differences.
+    """
+    chart_data = (
+        data.dropna(subset=["guest_satisfaction"])
+        .groupby("city", as_index=False)
+        .agg(guest_satisfaction=("guest_satisfaction", "mean"))
+        .sort_values("guest_satisfaction", ascending=True)
+    )
+    if chart_data.empty:
+        st.info("No guest satisfaction data available for this selection.")
+        return
+
+    fig = px.bar(
+        chart_data,
+        x="guest_satisfaction",
+        y="city",
+        orientation="h",
+        title="Average Guest Satisfaction by City",
+        labels={
+            "guest_satisfaction": "Average guest rating (/5)",
+            "city": "City",
+        },
+        color_discrete_sequence=["#65B89A"],
+    )
+    fig.update_traces(
+        marker_line_width=0,
+        hovertemplate="City: %{y}<br>Average rating: %{x:.2f}/5<extra></extra>",
+    )
+    fig.update_xaxes(range=[0, 5], dtick=1, ticksuffix=" / 5")
+    fig.update_layout(showlegend=False)
+    st.plotly_chart(
+        style_chart(
+            fig,
+            height=max(330, 58 * len(chart_data)),
+            show_legend=False,
+        ),
+        use_container_width=True,
+    )
+
+
+def add_attrition_bar(data):
+    """Grouped bars make seasonal attrition differences easy to compare."""
+    add_grouped_bar(
+        data,
+        "employee_attrition",
+        "Employee Attrition by Year and Season",
+        "Attrition rate",
+        suffix="%",
+    )
+
+
+def seasonal_insight(data, metric, label, formatter, high_is_good=True):
+    """Short, filter-aware observation comparing seasonal averages."""
+    summary = seasonal_trend(data)
+    if summary.empty or metric not in summary:
+        return "Not enough data in the current selection to identify a pattern."
+    summary = summary.groupby("season", observed=True)[metric].mean().dropna()
+    if summary.empty:
+        return "Not enough data in the current selection to identify a pattern."
+    best = summary.idxmax() if high_is_good else summary.idxmin()
+    low = summary.idxmin() if high_is_good else summary.idxmax()
+    if best == low:
+        return f"{label} is consistent across the selected seasons."
+    return (
+        f"{best} records the strongest {label.lower()} "
+        f"({formatter(summary[best])}); {low} is lowest "
+        f"({formatter(summary[low])}) in the selected period."
+    )
+
+
+def satisfaction_insight(data):
+    city = (data.dropna(subset=["guest_satisfaction"])
+            .groupby("city")["guest_satisfaction"].mean().dropna())
+    if city.empty:
+        return "No guest feedback is available for the current selection."
+    spread = city.max() - city.min()
+    if len(city) == 1 or spread < 0.03:
+        return "Guest ratings are very similar across the selected cities."
+    return (
+        f"{city.idxmax()} has the highest average rating "
+        f"({city.max():.2f}/5); {city.idxmin()} is lowest "
+        f"({city.min():.2f}/5)."
+    )
+
+
+try:
     df = load_data()
 
     if df.empty:
         st.warning("No data available.")
         st.stop()
 
+    validate_columns(df)
 
-    # ==================================================
-    # DASHBOARD FILTERS
-    # ==================================================
+    for col in [
+        "year", "total_revenue", "occupied_days", "sellable_days",
+        "guest_satisfaction", "employee_turnover_rate",
+    ]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    st.sidebar.header("Report Filters")
+    df["year"] = df["year"].astype("Int64")
+    df["season"] = df["season"].astype(str)
+    for col in ["city", "hotel_type", "hotel_name"]:
+        df[col] = df[col].fillna("Unknown").astype(str)
 
-    years = sorted(df["year"].dropna().unique())
+    # --------------------------------------------------------
+    # SIDEBAR FILTERS
+    # --------------------------------------------------------
+
+    st.sidebar.header("Filters")
+
+    year_options = sorted(int(y) for y in df["year"].dropna().unique())
+    default_years = [y for y in DEFAULT_YEARS if y in year_options]
+    if not default_years:
+        default_years = year_options
 
     selected_years = st.sidebar.multiselect(
-        "Reporting Year",
-        years,
-        default=years
+        "Year", year_options, default=default_years
     )
 
-    hotels = sorted(df["hotel_name"].dropna().unique())
-
-    selected_hotel = st.sidebar.selectbox(
-        "Hotel",
-        ["All Hotels"] + hotels
+    city_options = sorted(df["city"].unique())
+    selected_cities = st.sidebar.multiselect(
+        "City", city_options, default=city_options
     )
 
-    seasons = [
-        "Winter",
-        "Summer",
-        "Monsoon",
-        "Post-Monsoon"
-    ]
+    city_data = df[df["city"].isin(selected_cities)]
+    type_options = sorted(city_data["hotel_type"].unique())
+    selected_types = st.sidebar.multiselect(
+        "Hotel Type", type_options, default=type_options
+    )
 
+    type_data = city_data[city_data["hotel_type"].isin(selected_types)]
+    hotel_options = sorted(type_data["hotel_name"].unique())
+    selected_hotels = st.sidebar.multiselect(
+        "Hotel", hotel_options, default=hotel_options
+    )
+
+    season_options = [s for s in SEASON_ORDER if s in df["season"].unique()]
+    season_options += sorted(set(df["season"].unique()) - set(season_options))
     selected_seasons = st.sidebar.multiselect(
-        "Season",
-        seasons,
-        default=seasons
+        "Season", season_options, default=season_options
     )
 
-    st.sidebar.divider()
-
-    st.sidebar.caption(
-        "Use these filters to explore performance "
-        "for specific hotels, years and seasons."
-    )
-
-
-    # ==================================================
-    # APPLY FILTERS
-    # ==================================================
-
-    if not selected_years:
-        st.warning("Please select at least one reporting year.")
+    if not selected_years or not selected_cities or not selected_types \
+            or not selected_hotels or not selected_seasons:
+        st.warning("Please select at least one value in each filter.")
         st.stop()
 
-    if not selected_seasons:
-        st.warning("Please select at least one season.")
-        st.stop()
-
-    comparison_df = df[
+    filtered = df[
         df["year"].isin(selected_years)
-    ].copy()
-
-    if selected_hotel != "All Hotels":
-        comparison_df = comparison_df[
-            comparison_df["hotel_name"] == selected_hotel
-        ]
-
-    filtered = comparison_df[
-        comparison_df["season"].isin(selected_seasons)
-    ].copy()
-
-    other_seasons = comparison_df[
-        ~comparison_df["season"].isin(selected_seasons)
+        & df["city"].isin(selected_cities)
+        & df["hotel_type"].isin(selected_types)
+        & df["hotel_name"].isin(selected_hotels)
+        & df["season"].isin(selected_seasons)
     ].copy()
 
     if filtered.empty:
         st.warning("No records match the selected filters.")
         st.stop()
 
+    m = portfolio_metrics(filtered)
 
-    # ==================================================
-    # KPI CALCULATION FUNCTION
-    # ==================================================
+    # --------------------------------------------------------
+    # 1. EXECUTIVE OVERVIEW
+    # --------------------------------------------------------
 
-    def calculate_metrics(data):
+    st.subheader("Executive Overview")
 
-        revenue = data["total_revenue"].sum()
-        occupied = data["occupied_days"].sum()
-        sellable = data["sellable_days"].sum()
-
-        return {
-            "revenue": revenue,
-
-            "occupancy": (
-                occupied * 100 / sellable
-                if sellable else 0
-            ),
-
-            "average_room_revenue": (
-                revenue / occupied
-                if occupied else 0
-            ),
-
-            "revenue_per_available_room": (
-                revenue / sellable
-                if sellable else 0
-            ),
-
-            "rating": data["guest_satisfaction"].mean(),
-
-            "attrition": data["employee_turnover_rate"].mean()
-        }
-
-
-    def build_seasonal_summary(data):
-
-        rows = []
-
-        for season in seasons:
-
-            season_data = data[
-                data["season"] == season
-            ]
-
-            if not season_data.empty:
-
-                rows.append({
-                    "season": season,
-                    **calculate_metrics(season_data)
-                })
-
-        return pd.DataFrame(rows)
-
-
-    selected_metrics = calculate_metrics(filtered)
-
-
-    # ==================================================
-    # REPORT CONTEXT
-    # ==================================================
-
-    year_text = ", ".join(
-        map(str, sorted(selected_years))
-    )
-
-    hotel_text = (
-        selected_hotel
-        if selected_hotel != "All Hotels"
-        else "All Hotels"
-    )
-
-    season_text = ", ".join(selected_seasons)
-
-    st.info(
-        f"**Report scope:** {hotel_text}  |  "
-        f"**Years:** {year_text}  |  "
-        f"**Seasons:** {season_text}"
-    )
-
-
-    # ==================================================
-    # KEY PERFORMANCE INDICATORS
-    # ==================================================
-
-    st.divider()
-
-    st.markdown("## Overall Performance at a Glance")
-
-    st.caption(
-        "These indicators summarise room utilisation, "
-        "room revenue, guest experience and employee retention."
-    )
-
-    c1, c2, c3, c4, c5 = st.columns(5)
-
-    c1.metric(
-        "Room Occupancy",
-        f"{selected_metrics['occupancy']:.2f}%"
-    )
-    c1.caption(
-        "Share of available room-days that were occupied."
-    )
-
-    c2.metric(
-        "Average Revenue per Occupied Room",
-        f"₹{selected_metrics['average_room_revenue']:,.2f}"
-    )
-    c2.caption(
-        "Average room revenue earned for each occupied room-day."
-    )
-
-    c3.metric(
-        "Revenue per Available Room",
-        f"₹{selected_metrics['revenue_per_available_room']:,.2f}"
-    )
-    c3.caption(
-        "Room revenue earned for each available room-day."
-    )
-
-    c4.metric(
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Room Occupancy", f"{m['occupancy']:.2f}%")
+    k1.caption("Share of available room-days occupied.")
+    k2.metric("ADR", f"₹{m['adr']:,.2f}")
+    k2.caption("Room revenue per occupied room-day.")
+    k3.metric("RevPAR", f"₹{m['revpar']:,.2f}")
+    k3.caption("Room revenue per available room-day.")
+    k4.metric(
         "Guest Satisfaction",
-        (
-            f"{selected_metrics['rating']:.2f}/5"
-            if pd.notna(selected_metrics["rating"])
-            else "N/A"
-        )
+        f"{m['rating']:.2f}/5" if pd.notna(m["rating"]) else "N/A",
     )
-    c4.caption(
-        "Average rating provided through guest feedback."
-    )
-
-    c5.metric(
+    k4.caption("Average rating from guest feedback.")
+    k5.metric(
         "Employee Attrition",
-        (
-            f"{selected_metrics['attrition']:.2f}%"
-            if pd.notna(selected_metrics["attrition"])
-            else "N/A"
-        )
+        f"{m['attrition']:.2f}%" if pd.notna(m["attrition"]) else "N/A",
     )
-    c5.caption(
-        "Percentage of employees leaving during the period."
+    k5.caption("Employee exits as a share of average headcount.")
+
+    st.caption(
+        f"Selected portfolio: **{len(selected_hotels)} hotels** across "
+        f"**{len(selected_cities)} cities** | Reporting years: "
+        f"**{', '.join(map(str, sorted(selected_years)))}** | "
+        f"Room revenue: **₹{m['revenue']:,.0f}**"
     )
-
-
-    # ==================================================
-    # KPI GUIDE
-    # ==================================================
-
-    with st.expander("📘 KPI Guide – Definitions, Formulas and Business Use"):
-
-        st.markdown(
-            "This guide explains what each performance indicator "
-            "measures, why it matters and how hotel management "
-            "can interpret it."
-        )
-
-        st.markdown("### 1. Room Occupancy")
-
-        st.markdown(
-            """
-            **What is it?**
-
-            The percentage of available room-days that were occupied
-            during the selected reporting period.
-
-            **Formula:**
-
-            Occupancy = (Occupied Room-Days / Available Room-Days) × 100
-
-            **Why is it used?**
-
-            Helps management understand how effectively the hotel
-            is using its available room inventory.
-
-            **How to interpret it:**
-            - Higher occupancy generally indicates stronger room utilisation.
-            - Lower occupancy may indicate weaker demand or unused room capacity.
-
-            **Management action:**
-
-            Review demand patterns, room availability and promotional
-            opportunities to improve room utilisation.
-            """
-        )
-
-        st.divider()
-
-        st.markdown("### 2. Average Revenue per Occupied Room")
-
-        st.markdown(
-            """
-            **What is it?**
-
-            The average room revenue earned for each occupied room-day.
-            This is commonly known in the hotel industry as ADR.
-
-            **Formula:**
-
-            Average Revenue per Occupied Room = Room Revenue / Occupied Room-Days
-
-            **Why is it used?**
-
-            Helps management evaluate room pricing and understand
-            how much revenue occupied rooms generate on average.
-
-            **How to interpret it:**
-            - Higher values indicate higher average room revenue.
-            - Lower values may indicate lower room rates or greater use of discounts.
-
-            **Management action:**
-
-            Review pricing strategies, discount levels, room categories
-            and upselling opportunities.
-            """
-        )
-
-        st.divider()
-
-        st.markdown("### 3. Revenue per Available Room")
-
-        st.markdown(
-            """
-            **What is it?**
-
-            The average room revenue generated for every available
-            room-day, whether the room was occupied or not.
-            This is commonly known as RevPAR.
-
-            **Formula:**
-
-            Revenue per Available Room = Room Revenue / Available Room-Days
-
-            **Why is it used?**
-
-            Combines room occupancy and room pricing into one indicator.
-            It helps management understand how effectively available
-            room capacity generates revenue.
-
-            **How to interpret it:**
-            - Higher values generally indicate stronger room revenue performance.
-            - Lower values may indicate low occupancy, lower room rates or both.
-
-            **Management action:**
-
-            Review occupancy and room pricing together rather than
-            focusing on either measure in isolation.
-            """
-        )
-
-        st.divider()
-
-        st.markdown("### 4. Guest Satisfaction")
-
-        st.markdown(
-            """
-            **What is it?**
-
-            The average rating submitted by guests through feedback
-            and review records.
-
-            **Formula:**
-
-            Guest Satisfaction = Sum of Guest Ratings / Number of Ratings
-
-            **Why is it used?**
-
-            Helps management monitor the guest experience and identify
-            areas where service quality may need attention.
-
-            **How to interpret it:**
-            - Higher ratings generally indicate better guest feedback.
-            - Lower ratings may highlight dissatisfaction or service issues.
-
-            **Management action:**
-
-            Review guest comments, identify recurring complaints and
-            investigate service areas that need improvement.
-            """
-        )
-
-        st.divider()
-
-        st.markdown("### 5. Employee Attrition")
-
-        st.markdown(
-            """
-            **What is it?**
-
-            The percentage of employees who left the organisation
-            relative to its average workforce during the period.
-
-            **Formula:**
-
-            Employee Attrition = (Employee Exits / Average Headcount) × 100
-
-            **Why is it used?**
-
-            Helps management monitor workforce stability and understand
-            employee retention across hotels and seasons.
-
-            **How to interpret it:**
-            - Higher attrition indicates more employee exits relative to workforce size.
-            - Lower attrition generally indicates greater workforce stability.
-
-            **Management action:**
-
-            Review staffing patterns, employee feedback, recruitment
-            needs and retention practices.
-            """
-        )
-
-        st.divider()
-
-        st.markdown("### Important interpretation notes")
-
-        st.markdown(
-            """
-            - Revenue indicators in this dashboard relate to room revenue,
-              not necessarily total hotel revenue from food, events or other services.
-            - Room occupancy is calculated using occupied and available room-days.
-            - Average revenue per occupied room and revenue per available room
-              are calculated using aggregated room revenue and room-days.
-            - Guest satisfaction and employee attrition are displayed as
-              averages of the underlying hotel-season records.
-            - A high or low KPI is a signal for investigation, not proof
-              of the reason behind a business outcome.
-            """
-        )
-
-
-    # ==================================================
-    # SEASONAL PERFORMANCE TRENDS
-    # ==================================================
 
     st.divider()
 
-    st.markdown("## Seasonal Business Performance")
+    # --------------------------------------------------------
+    # 2–6. KPI ANALYSIS: ONE CHART PER KPI
+    # --------------------------------------------------------
 
+    st.subheader("Performance Trends")
     st.caption(
-        "Explore how room occupancy and room revenue change "
-        "across seasons and reporting years."
+        "Seasonal trends across the selected reporting years. "
+        "A consistent dark visual theme is used throughout."
     )
 
-    season_order = [
-        "Winter",
-        "Summer",
-        "Monsoon",
-        "Post-Monsoon"
-    ]
-
-    trend = (
-        filtered.groupby(
-            ["year", "season"],
-            as_index=False,
-            observed=True
-        )
-        .agg(
-            occupied_room_days=("occupied_days", "sum"),
-            available_room_days=("sellable_days", "sum"),
-            revenue=("total_revenue", "sum")
-        )
+    st.markdown("#### Room Occupancy")
+    st.caption("Occupied room-days as a percentage of available room-days.")
+    add_trend_line(
+        filtered, "occupancy", "Occupancy by Year and Season",
+        "Occupancy", suffix="%"
     )
+    st.caption("**Insight:** " + seasonal_insight(
+        filtered, "occupancy", "occupancy", lambda v: f"{v:.1f}%"
+    ))
 
-    trend["occupancy_rate"] = (
-        trend["occupied_room_days"] * 100 /
-        trend["available_room_days"].replace(
-            0, float("nan")
-        )
+    st.markdown("#### Average Daily Rate (ADR)")
+    st.caption("Room revenue earned per occupied room-day.")
+    add_grouped_bar(
+        filtered, "adr", "Average Daily Rate by Year and Season",
+        "ADR", prefix="₹"
     )
+    st.caption("**Insight:** " + seasonal_insight(
+        filtered, "adr", "ADR", lambda v: f"₹{v:,.0f}"
+    ))
 
-    trend["season"] = pd.Categorical(
-        trend["season"],
-        categories=season_order,
-        ordered=True
+    st.markdown("#### Revenue per Available Room (RevPAR)")
+    st.caption("Room revenue earned per available room-day.")
+    add_trend_line(
+        filtered, "revpar", "RevPAR by Year and Season",
+        "RevPAR", prefix="₹"
     )
+    st.caption("**Insight:** " + seasonal_insight(
+        filtered, "revpar", "RevPAR", lambda v: f"₹{v:,.0f}"
+    ))
 
-    trend = trend.sort_values(
-        ["year", "season"]
-    )
-
-
-    # --------------------------------------------------
-    # CHART 1: ROOM OCCUPANCY
-    # --------------------------------------------------
-
-    st.markdown("### Room Occupancy Across Seasons")
-
+    st.markdown("#### Guest Satisfaction")
     st.caption(
-        "Shows the percentage of available room-days occupied "
-        "in each season. Use this chart to identify periods of "
-        "stronger or weaker room utilisation."
+        "City-wise average feedback rating. Ratings are tightly clustered, "
+        "so the chart keeps the honest 0–5 scale rather than magnifying small differences."
     )
+    add_satisfaction_bar(filtered)
+    st.caption("**Insight:** " + satisfaction_insight(filtered))
 
-    fig1 = px.line(
-        trend,
-        x="year",
-        y="occupancy_rate",
-        color="season",
-        markers=True,
-        title="Room Occupancy by Year and Season",
-        labels={
-            "year": "Reporting Year",
-            "occupancy_rate": "Room Occupancy (%)",
-            "season": "Season"
+    st.markdown("#### Employee Attrition")
+    st.caption("Employee exits as a percentage of average employee headcount.")
+    add_attrition_bar(filtered)
+    st.caption("**Insight:** " + seasonal_insight(
+        filtered, "employee_attrition", "attrition", lambda v: f"{v:.2f}%",
+        high_is_good=False,
+    ))
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # 7. CITY AND HOTEL COMPARISON
+    # --------------------------------------------------------
+
+    st.subheader("City & Hotel Comparison")
+
+    city_table = calculate_grouped(filtered, ["city"])
+    city_table = city_table.rename(
+        columns={
+            "city": "City",
+            "room_revenue": "Room Revenue (₹)",
+            "occupancy": "Occupancy (%)",
+            "adr": "ADR (₹)",
+            "revpar": "RevPAR (₹)",
+            "guest_satisfaction": "Guest Rating (/5)",
+            "employee_attrition": "Employee Attrition (%)",
         }
     )
 
-    fig1.update_layout(
-        template="plotly_white",
-        height=420,
-        title_font_size=20,
-        legend_title_text="Season",
-        xaxis_title="Reporting Year",
-        yaxis_title="Room Occupancy (%)",
-        hovermode="x unified"
+    st.markdown("**City performance**")
+    st.dataframe(
+        city_table[
+            [
+                "City", "Room Revenue (₹)", "Occupancy (%)", "ADR (₹)",
+                "RevPAR (₹)", "Guest Rating (/5)", "Employee Attrition (%)",
+            ]
+        ].round(2),
+        use_container_width=True,
+        hide_index=True,
     )
 
-    fig1.update_yaxes(
-        ticksuffix="%"
+    hotel_table = calculate_grouped(
+        filtered, ["hotel_name", "city", "hotel_type"]
     )
-
-    fig1.update_traces(
-        hovertemplate=(
-            "Year: %{x}<br>"
-            "Room Occupancy: %{y:.2f}%"
-            "<extra></extra>"
-        )
-    )
-
-    st.plotly_chart(
-        fig1,
-        use_container_width=True
-    )
-
-
-    # ==================================================
-    # REVENUE COMPARISON
-    # ==================================================
-
-    revenue_trend = (
-        filtered.groupby(
-            "season",
-            as_index=False,
-            observed=True
-        )["total_revenue"].sum()
-    )
-
-    revenue_trend["revenue_lakhs"] = (
-        revenue_trend["total_revenue"] / 100000
-    )
-
-    revenue_trend["season"] = pd.Categorical(
-        revenue_trend["season"],
-        categories=season_order,
-        ordered=True
-    )
-
-    revenue_trend = revenue_trend.sort_values(
-        "season"
-    )
-
-
-    # --------------------------------------------------
-    # CHART 2: ROOM REVENUE
-    # --------------------------------------------------
-
-    st.markdown("### Room Revenue Across Seasons")
-
-    st.caption(
-        "Compares total room revenue generated in each selected season. "
-        "Values are displayed in ₹ lakh for easier comparison."
-    )
-
-    fig2 = px.bar(
-        revenue_trend,
-        x="season",
-        y="revenue_lakhs",
-        title="Total Room Revenue by Season",
-        labels={
-            "season": "Season",
-            "revenue_lakhs": "Room Revenue (₹ lakh)"
-        },
-        text_auto=".2f"
-    )
-
-    fig2.update_layout(
-        template="plotly_white",
-        height=420,
-        title_font_size=20,
-        xaxis_title="Season",
-        yaxis_title="Room Revenue (₹ lakh)",
-        showlegend=False
-    )
-
-    fig2.update_traces(
-        textposition="outside",
-        hovertemplate=(
-            "Season: %{x}<br>"
-            "Room Revenue: ₹%{customdata:,.2f}"
-            "<extra></extra>"
-        ),
-        customdata=revenue_trend[["total_revenue"]].values
-    )
-
-    st.plotly_chart(
-        fig2,
-        use_container_width=True
-    )
-
-
-    # ==================================================
-    # HOTEL-WISE COMPARISON
-    # ==================================================
-
-    hotel_data = (
-        filtered.groupby(
-            "hotel_name",
-            as_index=False
-        )
-        .agg(
-            revenue=("total_revenue", "sum"),
-            occupied=("occupied_days", "sum"),
-            available=("sellable_days", "sum")
-        )
-    )
-
-    hotel_data["occupancy_rate"] = (
-        hotel_data["occupied"] * 100 /
-        hotel_data["available"].replace(
-            0, float("nan")
-        )
-    )
-
-    hotel_data = hotel_data.sort_values(
-        "occupancy_rate",
-        ascending=False
-    )
-
-
-    # --------------------------------------------------
-    # CHART 3: HOTEL COMPARISON
-    # --------------------------------------------------
-
-    st.markdown("### Room Occupancy Comparison Across Hotels")
-
-    st.caption(
-        "Ranks hotels by room occupancy for the selected reporting "
-        "period. This helps management identify stronger-performing "
-        "properties and hotels that may need attention."
-    )
-
-    fig3 = px.bar(
-        hotel_data,
-        x="hotel_name",
-        y="occupancy_rate",
-        title="Hotel-wise Room Occupancy",
-        labels={
+    hotel_table = hotel_table.rename(
+        columns={
             "hotel_name": "Hotel",
-            "occupancy_rate": "Room Occupancy (%)"
-        },
-        text_auto=".2f"
+            "city": "City",
+            "hotel_type": "Hotel Type",
+            "room_revenue": "Room Revenue (₹)",
+            "occupancy": "Occupancy (%)",
+            "adr": "ADR (₹)",
+            "revpar": "RevPAR (₹)",
+            "guest_satisfaction": "Guest Rating (/5)",
+            "employee_attrition": "Employee Attrition (%)",
+        }
     )
 
-    fig3.update_layout(
-        template="plotly_white",
-        height=480,
-        title_font_size=20,
-        xaxis_title="Hotel",
-        yaxis_title="Room Occupancy (%)",
-        showlegend=False,
-        xaxis_tickangle=-35
-    )
-
-    fig3.update_traces(
-        textposition="outside",
-        hovertemplate=(
-            "Hotel: %{x}<br>"
-            "Room Occupancy: %{y:.2f}%"
-            "<extra></extra>"
+    with st.expander("View hotel-level comparison"):
+        st.dataframe(
+            hotel_table.sort_values("RevPAR (₹)", ascending=False).round(2),
+            use_container_width=True,
+            hide_index=True,
         )
-    )
-
-    fig3.update_yaxes(
-        ticksuffix="%"
-    )
-
-    st.plotly_chart(
-        fig3,
-        use_container_width=True
-    )
-
-
-    # ==================================================
-    # BUSINESS INSIGHTS
-    # ==================================================
 
     st.divider()
 
-    st.markdown("## What the Numbers Tell Us")
-
-    st.caption(
-        "Business observations and suggested actions based on "
-        "the selected hotels, reporting years and seasons."
-    )
-
-    insight_col, recommendation_col = st.columns(2)
-
-    recommendations = []
-
-    with insight_col:
-
-        st.markdown("### Key Business Insights")
-
-        if not other_seasons.empty:
-
-            comparison_metrics = calculate_metrics(
-                other_seasons
-            )
-
-            occupancy_diff = (
-                selected_metrics["occupancy"]
-                - comparison_metrics["occupancy"]
-            )
-
-            average_room_revenue_diff = (
-                selected_metrics["average_room_revenue"]
-                - comparison_metrics["average_room_revenue"]
-            )
-
-            available_room_revenue_diff = (
-                selected_metrics["revenue_per_available_room"]
-                - comparison_metrics["revenue_per_available_room"]
-            )
-
-            rating_diff = (
-                selected_metrics["rating"]
-                - comparison_metrics["rating"]
-            )
-
-            attrition_diff = (
-                selected_metrics["attrition"]
-                - comparison_metrics["attrition"]
-            )
-
-            st.markdown(
-                f"""
-                - **Room Occupancy:** {selected_metrics['occupancy']:.2f}%
-                  ({occupancy_diff:+.2f} percentage points compared
-                  with the unselected seasons).
-
-                - **Average Revenue per Occupied Room:**
-                  ₹{selected_metrics['average_room_revenue']:,.2f}
-                  ({average_room_revenue_diff:+,.2f} compared
-                  with the unselected seasons).
-
-                - **Revenue per Available Room:**
-                  ₹{selected_metrics['revenue_per_available_room']:,.2f}
-                  ({available_room_revenue_diff:+,.2f} compared
-                  with the unselected seasons).
-
-                - **Guest Satisfaction:**
-                  {
-                      f"{selected_metrics['rating']:.2f}/5"
-                      if pd.notna(selected_metrics["rating"])
-                      else "Not available"
-                  }
-                  {
-                      f"({rating_diff:+.2f} compared with the unselected seasons)"
-                      if pd.notna(rating_diff)
-                      else ""
-                  }.
-
-                - **Employee Attrition:**
-                  {
-                      f"{selected_metrics['attrition']:.2f}%"
-                      if pd.notna(selected_metrics["attrition"])
-                      else "Not available"
-                  }
-                  {
-                      f"({attrition_diff:+.2f} percentage points compared with the unselected seasons)"
-                      if pd.notna(attrition_diff)
-                      else ""
-                  }.
-                """
-            )
-
-        else:
-
-            seasonal_summary = build_seasonal_summary(
-                comparison_df
-            )
-
-            if not seasonal_summary.empty:
-
-                best_occupancy = seasonal_summary.loc[
-                    seasonal_summary["occupancy"].idxmax()
-                ]
-
-                best_revenue = seasonal_summary.loc[
-                    seasonal_summary["revenue_per_available_room"].idxmax()
-                ]
-
-                lowest_revenue = seasonal_summary.loc[
-                    seasonal_summary["revenue_per_available_room"].idxmin()
-                ]
-
-                highest_attrition = seasonal_summary.loc[
-                    seasonal_summary["attrition"].idxmax()
-                ]
-
-                st.markdown(
-                    f"""
-                    - **Highest Room Occupancy:** {best_occupancy['season']}
-                      ({best_occupancy['occupancy']:.2f}%).
-                    - **Highest Revenue per Available Room:**
-                      {best_revenue['season']}
-                      (₹{best_revenue['revenue_per_available_room']:,.2f}).
-                    - **Lowest Revenue per Available Room:**
-                      {lowest_revenue['season']}
-                      (₹{lowest_revenue['revenue_per_available_room']:,.2f}).
-                    - **Highest Employee Attrition:**
-                      {highest_attrition['season']}
-                      ({highest_attrition['attrition']:.2f}%).
-                    """
-                )
-
-
-    # ==================================================
-    # DYNAMIC RECOMMENDATIONS
-    # ==================================================
-
-    if not other_seasons.empty:
-
-        comparison_metrics = calculate_metrics(
-            other_seasons
-        )
-
-        # Room occupancy
-
-        occupancy_diff = (
-            selected_metrics["occupancy"]
-            - comparison_metrics["occupancy"]
-        )
-
-        if occupancy_diff < -1:
-
-            recommendations.append(
-                f"Room occupancy is {abs(occupancy_diff):.2f} "
-                "percentage points below the unselected seasons. "
-                "Evaluate targeted promotions, demand-generation "
-                "campaigns and room availability."
-            )
-
-        elif occupancy_diff > 1:
-
-            recommendations.append(
-                f"Room occupancy is {occupancy_diff:.2f} "
-                "percentage points higher than the unselected seasons. "
-                "Review room inventory and opportunities to optimise pricing."
-            )
-
-        else:
-
-            recommendations.append(
-                "Room occupancy is broadly comparable with the "
-                "unselected seasons. Continue monitoring demand "
-                "and room utilisation."
-            )
-
-
-        # Average revenue per occupied room
-
-        average_room_revenue_diff = (
-            selected_metrics["average_room_revenue"]
-            - comparison_metrics["average_room_revenue"]
-        )
-
-        if average_room_revenue_diff < 0:
-
-            recommendations.append(
-                f"Average revenue per occupied room is "
-                f"₹{abs(average_room_revenue_diff):,.2f} lower than "
-                "the unselected seasons. Review room rates, discounts "
-                "and upselling opportunities."
-            )
-
-        else:
-
-            recommendations.append(
-                f"Average revenue per occupied room is "
-                f"₹{average_room_revenue_diff:,.2f} higher than "
-                "the unselected seasons. Review which pricing "
-                "practices are contributing to this performance."
-            )
-
-
-        # Revenue per available room
-
-        available_room_revenue_diff = (
-            selected_metrics["revenue_per_available_room"]
-            - comparison_metrics["revenue_per_available_room"]
-        )
-
-        if available_room_revenue_diff < 0:
-
-            recommendations.append(
-                "Revenue per available room is lower than in the "
-                "unselected seasons. Review room occupancy and "
-                "pricing together to identify improvement opportunities."
-            )
-
-        else:
-
-            recommendations.append(
-                "Revenue per available room is higher than in the "
-                "unselected seasons. Identify successful demand "
-                "and pricing practices that can be sustained."
-            )
-
-
-        # Guest satisfaction
-
-        rating_diff = (
-            selected_metrics["rating"]
-            - comparison_metrics["rating"]
-        )
-
-        if pd.notna(rating_diff):
-
-            if rating_diff < -0.1:
-
-                recommendations.append(
-                    "Guest satisfaction is lower than in the "
-                    "unselected seasons. Review guest feedback and "
-                    "investigate recurring service-quality concerns."
-                )
-
-            else:
-
-                recommendations.append(
-                    "Guest satisfaction is comparable to or higher "
-                    "than in the unselected seasons. Continue "
-                    "monitoring guest feedback and service standards."
-                )
-
-
-        # Employee attrition
-
-        attrition_diff = (
-            selected_metrics["attrition"]
-            - comparison_metrics["attrition"]
-        )
-
-        if pd.notna(attrition_diff):
-
-            if attrition_diff > 0.5:
-
-                recommendations.append(
-                    "Employee attrition is higher than in the "
-                    "unselected seasons. Review workforce planning, "
-                    "staffing patterns and employee retention practices."
-                )
-
-            else:
-
-                recommendations.append(
-                    "Employee attrition is not higher than in the "
-                    "unselected seasons. Continue monitoring workforce "
-                    "stability and retention."
-                )
-
-    else:
-
-        seasonal_summary = build_seasonal_summary(
-            comparison_df
-        )
-
-        if not seasonal_summary.empty:
-
-            best_revenue = seasonal_summary.loc[
-                seasonal_summary["revenue_per_available_room"].idxmax()
-            ]
-
-            lowest_revenue = seasonal_summary.loc[
-                seasonal_summary["revenue_per_available_room"].idxmin()
-            ]
-
-            lowest_occupancy = seasonal_summary.loc[
-                seasonal_summary["occupancy"].idxmin()
-            ]
-
-            highest_attrition = seasonal_summary.loc[
-                seasonal_summary["attrition"].idxmax()
-            ]
-
-            recommendations.append(
-                f"{best_revenue['season']} has the strongest revenue "
-                f"per available room at "
-                f"₹{best_revenue['revenue_per_available_room']:,.2f}. "
-                "Study its room pricing and demand patterns."
-            )
-
-            recommendations.append(
-                f"{lowest_revenue['season']} has the lowest revenue "
-                f"per available room at "
-                f"₹{lowest_revenue['revenue_per_available_room']:,.2f}. "
-                "Review room pricing and revenue opportunities."
-            )
-
-            recommendations.append(
-                f"{lowest_occupancy['season']} has the lowest room "
-                f"occupancy at {lowest_occupancy['occupancy']:.2f}%. "
-                "Evaluate targeted campaigns to improve room demand."
-            )
-
-            recommendations.append(
-                f"{highest_attrition['season']} has the highest "
-                f"employee attrition at "
-                f"{highest_attrition['attrition']:.2f}%. "
-                "Review seasonal staffing and retention practices."
-            )
-
-
-    with recommendation_col:
-
-        st.markdown("### Suggested Management Actions")
-
-        for i, recommendation in enumerate(
-            recommendations, 1
-        ):
-
-            st.markdown(
-                f"**{i}.** {recommendation}"
-            )
-
-
-    st.caption(
-        "These observations compare selected seasons with "
-        "unselected seasons, or identify seasonal highs and lows "
-        "when all seasons are selected. Seasonal associations "
-        "do not establish causation."
-    )
-
-
-    # ==================================================
-    # DETAILED PERFORMANCE TABLE
-    # ==================================================
-
-    st.divider()
-
-    st.markdown("## Detailed Hotel Performance")
-
-    st.caption(
-        "Explore the underlying performance indicators for each "
-        "hotel, reporting year and season."
-    )
+    # --------------------------------------------------------
+    # 8. DETAILED DATA AND EXPORT
+    # --------------------------------------------------------
+
+    st.subheader("Detailed Data")
+    st.caption("Hotel-season records included in the current filter selection.")
 
     display_df = filtered.sort_values(
-        ["year", "season", "hotel_name"]
+        ["year", "season", "city", "hotel_name"]
     ).copy()
 
     display_df = display_df.rename(
@@ -1090,66 +597,47 @@ try:
             "sellable_days": "Available Room-Days",
             "occupied_days": "Occupied Room-Days",
             "occupancy_rate": "Room Occupancy (%)",
-            "ADR": "Average Revenue per Occupied Room (₹)",
-            "RevPAR": "Revenue per Available Room (₹)",
-            "total_revenue": "Total Room Revenue (₹)",
+            "ADR": "ADR (₹)",
+            "RevPAR": "RevPAR (₹)",
+            "total_revenue": "Room Revenue (₹)",
             "guest_satisfaction": "Guest Satisfaction (/5)",
             "total_bookings": "Total Bookings",
             "cancelled_bookings": "Cancelled Bookings",
             "no_show_bookings": "No-Show Bookings",
             "employee_exits": "Employee Exits",
             "avg_headcount": "Average Employee Headcount",
-            "employee_turnover_rate": "Employee Attrition (%)"
+            "employee_turnover_rate": "Employee Attrition (%)",
         }
     )
 
-    st.dataframe(
-        display_df,
-        use_container_width=True,
-        hide_index=True
-    )
-
-
-    # ==================================================
-    # DOWNLOAD REPORT
-    # ==================================================
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
 
     st.download_button(
-        label="📥 Download Hotel Performance Report",
-        data=display_df.to_csv(index=False),
-        file_name="hotel_business_performance_report.csv",
-        mime="text/csv"
+        "Download filtered report (CSV)",
+        data=display_df.to_csv(index=False).encode("utf-8"),
+        file_name="horizon_hospitality_filtered_report.csv",
+        mime="text/csv",
     )
 
-
-    # ==================================================
-    # DATA NOTES
-    # ==================================================
-
-    with st.expander("ℹ️ About This Report"):
-
+    with st.expander("KPI definitions & methodology"):
         st.markdown(
             """
-            - The dashboard uses aggregated hotel performance data
-              prepared from the underlying booking, room, feedback
-              and employee records.
-            - Room revenue indicators represent room revenue and
-              should not be interpreted as total hotel revenue.
-            - Occupancy and revenue calculations use room-days
-              to account for differences in room availability.
-            - Guest satisfaction and employee attrition are shown
-              as averages of the underlying hotel-season records.
-            - The report should be interpreted within the selected
-              reporting period and filters.
-            - Seasonal comparisons highlight patterns and areas
-              for investigation; they do not prove the causes
-              of business performance.
+            - **Occupancy:** Occupied Room-Days / Available Room-Days × 100
+            - **ADR:** Room Revenue / Occupied Room-Days
+            - **RevPAR:** Room Revenue / Available Room-Days
+            - **Guest Satisfaction:** Average guest feedback rating
+            - **Employee Attrition:** Employee Exits / Average Employee Headcount × 100
             """
         )
+        st.caption(
+            "Room revenue is room-only revenue, not total hotel revenue. "
+            "Room KPIs are recalculated from summed revenue and room-days. "
+            "Guest satisfaction and employee attrition remain averages of "
+            "hotel-season aggregate values and are not weighted by review "
+            "volume or employee headcount. 2027 is excluded from the default "
+            "selection because it is a partial year."
+        )
 
-
-except Exception as e:
-
-    st.error(
-        f"Dashboard error: {e}"
-    )
+except Exception as exc:
+    st.error(f"Dashboard could not be loaded: {exc}")
+    st.exception(exc)
